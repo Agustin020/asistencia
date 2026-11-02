@@ -1,0 +1,22 @@
+{
+  "name": "mendotaku-asistencia",
+  "version": "1.0.0",
+  "description": "Planilla de asistencia del personal de seguridad: control de entrada/salida, plantilla de horarios, usuarios, roles y permisos.",
+  "private": true,
+  "type": "module",
+  "main": "backend/server.js",
+  "scripts": {
+    "start": "node backend/server.js",
+    "dev": "node --watch backend/server.js"
+  },
+  "engines": {
+    "node": ">=20.12"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.14",
+    "bcryptjs": "^3.0.3",
+    "express": "^5.3.0",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.23.1"
+  }
+}

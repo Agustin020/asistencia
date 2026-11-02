@@ -1,0 +1,25 @@
+# Blueprint de Render: crea el servicio web gratuito.
+# La base de datos va en Neon (gratis); pegá su cadena de conexión en DATABASE_URL.
+services:
+  - type: web
+    name: mendotaku-asistencia
+    runtime: node
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: EVENT_NAME
+        value: Mendotaku
+      - key: SESSION_HOURS
+        value: "24"
