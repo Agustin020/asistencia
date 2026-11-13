@@ -816,11 +816,27 @@ function textoResumen() {
   for (const t of sel) {
     const rt = registros.filter((r) => r.turno_id === t.id);
     const { ini } = rangoTurno(t);
-    const faltan = rt.filter((r) => !r.entrada);
-    const tarde = rt.filter((r) => r.entrada && new Date(r.entrada) - ini > t.tolerancia * 60000);
+    const tarde = (r) => r.entrada && new Date(r.entrada) - ini > t.tolerancia * 60000;
+    const nombre = (r) => `${r.apellido}, ${r.nombre}`;
+    const marcaTarde = (r) => (tarde(r) ? ` _(tarde +${dur(new Date(r.entrada) - ini)})_` : '');
+    const adentro = rt.filter((r) => estadoDe(r) === 'in');
+    const salieron = rt.filter((r) => estadoDe(r) === 'out');
+    const faltan = rt.filter((r) => estadoDe(r) === 'pend');
     lineas.push('', `▸ *${t.nombre.toUpperCase()}* (${t.hora_inicio}–${t.hora_fin}) — ${rt.length - faltan.length}/${rt.length}`);
-    if (faltan.length) lineas.push(`Faltan (${faltan.length}): ${faltan.map((r) => `${r.apellido} ${r.nombre}`).join(', ')}`);
-    if (tarde.length) lineas.push(`Llegaron tarde (${tarde.length}): ${tarde.map((r) => `${r.apellido} ${r.nombre} (${fmtHora(r.entrada)})`).join(', ')}`);
+    // Una persona por línea, agrupadas por estado, para que se lea bien en WhatsApp.
+    if (adentro.length) {
+      lineas.push(`✅ Adentro (${adentro.length}):`);
+      adentro.forEach((r) => lineas.push(`• ${nombre(r)} — ${fmtHora(r.entrada)}${marcaTarde(r)}`));
+    }
+    if (salieron.length) {
+      lineas.push(`🚪 Salieron (${salieron.length}):`);
+      salieron.forEach((r) => lineas.push(`• ${nombre(r)} — ${fmtHora(r.entrada)} a ${fmtHora(r.salida)}${marcaTarde(r)}`));
+    }
+    if (faltan.length) {
+      lineas.push(`❌ Faltan (${faltan.length}):`);
+      faltan.forEach((r) => lineas.push(`• ${nombre(r)} — DNI ${r.dni}`));
+    }
+    if (!rt.length) lineas.push('Sin personal asignado.');
   }
   return lineas.join('\n');
 }
