@@ -469,7 +469,12 @@ async function vistaControl() {
   };
   $('#lista').onclick = onClickLista;
   $('#bAgregar') && ($('#bAgregar').onclick = modalAgregar);
-  $('#bResumen') && ($('#bResumen').onclick = async () => { await copiar(textoResumen()); toast('Resumen copiado. Pegalo en WhatsApp.', { tipo: 'ok' }); });
+  $('#bResumen') &&
+    ($('#bResumen').onclick = async () => {
+      if (!c.data || !turnosFiltrados().some((g) => g.regs.length)) return toast('No hay registros con los filtros aplicados');
+      await copiar(textoResumen());
+      toast(hayFiltroExtra() ? `Resumen copiado (${descripcionFiltros()}).` : 'Resumen copiado. Pegalo en WhatsApp.', { tipo: 'ok' });
+    });
   $$('.bottombar [data-exp]').forEach((b) => (b.onclick = () => exportar(b.dataset.exp, b)));
   $('#bDescargar') && ($('#bDescargar').onclick = modalDescargar);
 
@@ -509,6 +514,41 @@ function estadoDe(r) {
   return r.salida ? 'out' : r.entrada ? 'in' : 'pend';
 }
 
+// ───────── Filtros de la planilla ─────────
+// La lista, "Copiar resumen" y las descargas usan exactamente los mismos filtros.
+
+const ESTADOS_FILTRO = { todos: 'Ver todos', pend: 'Pendientes', in: 'Adentro', out: 'Salieron' };
+
+// Estado y búsqueda (el turno se filtra aparte, porque agrupa la lista).
+function pasaFiltros(r) {
+  const c = S.ctl;
+  const q = norm(c.q).trim();
+  return (
+    (c.estado === 'todos' || estadoDe(r) === c.estado) &&
+    (!q || norm(`${r.apellido} ${r.nombre} ${r.nombre} ${r.apellido}`).includes(q) || r.dni.includes(q.replace(/\D/g, '') || '§'))
+  );
+}
+const hayFiltroExtra = () => S.ctl.estado !== 'todos' || !!S.ctl.q.trim();
+
+// Turnos del día con sus registros ya filtrados; sin filtros extra se incluyen también los turnos vacíos.
+function turnosFiltrados() {
+  const c = S.ctl;
+  return c.data.turnos
+    .filter((t) => c.turno === 'todos' || t.id === c.turno)
+    .map((t) => ({ t, regs: c.data.registros.filter((r) => r.turno_id === t.id && pasaFiltros(r)) }))
+    .filter((g) => g.regs.length || !hayFiltroExtra());
+}
+
+// Texto para encabezados de reportes: "Turno Noche · Adentro · Búsqueda “pérez”".
+function descripcionFiltros() {
+  const c = S.ctl;
+  const t = c.turno !== 'todos' && c.data.turnos.find((x) => x.id === c.turno);
+  const partes = [t ? `Turno ${t.nombre}` : 'Todos los turnos'];
+  if (c.estado !== 'todos') partes.push(ESTADOS_FILTRO[c.estado]);
+  if (c.q.trim()) partes.push(`Búsqueda “${c.q.trim()}”`);
+  return partes.join(' · ');
+}
+
 function pintarControl() {
   const c = S.ctl;
   if (!c.data || !$('#lista')) return;
@@ -531,17 +571,12 @@ function pintarControl() {
     turnos
       .map((t) => `<button class="pill ${c.turno === t.id ? 'on' : ''}" data-turno="${t.id}">${esc(t.nombre)}<small>${t.hora_inicio}</small></button>`)
       .join('');
-  const ESTADOS = [['todos', 'Ver todos'], ['pend', 'Pendientes'], ['in', 'Adentro'], ['out', 'Salieron']];
-  $('#pEstados').innerHTML = ESTADOS.map(
-    ([k, l]) => `<button class="pill ${c.estado === k ? 'on' : ''}" data-estado="${k}">${l}</button>`,
-  ).join('');
+  $('#pEstados').innerHTML = Object.entries(ESTADOS_FILTRO)
+    .map(([k, l]) => `<button class="pill ${c.estado === k ? 'on' : ''}" data-estado="${k}">${l}</button>`)
+    .join('');
 
-  const q = norm(c.q).trim();
-  const visibles = delTurno.filter(
-    (r) =>
-      (c.estado === 'todos' || estadoDe(r) === c.estado) &&
-      (!q || norm(`${r.apellido} ${r.nombre} ${r.nombre} ${r.apellido}`).includes(q) || r.dni.includes(q.replace(/\D/g, '') || '§')),
-  );
+  const filtrado = hayFiltroExtra();
+  const visibles = delTurno.filter(pasaFiltros);
 
   if (!registros.length) {
     $('#lista').innerHTML = `<div class="vacio"><h3>No hay personal asignado este día</h3>
@@ -553,7 +588,7 @@ function pintarControl() {
     if (c.turno !== 'todos' && c.turno !== t.id) continue;
     const regsT = registros.filter((r) => r.turno_id === t.id);
     const vis = visibles.filter((r) => r.turno_id === t.id);
-    if (!vis.length && (q || c.estado !== 'todos')) continue;
+    if (!vis.length && filtrado) continue;
     html += `<div class="grp">${esc(t.nombre)} · ${regsT.filter((r) => r.entrada).length}/${regsT.length}
       <small>${t.hora_inicio}–${t.hora_fin}${t.puesto ? ' · ' + esc(t.puesto) : ''} · tolerancia ${t.tolerancia} min</small></div>`;
     html += vis.length ? vis.map((r) => filaHtml(r, t)).join('') : '<div class="vacio">Sin personal asignado a este turno.</div>';
@@ -832,14 +867,13 @@ async function modalAgregar() {
 
 function textoResumen() {
   const c = S.ctl;
-  const { turnos, registros } = c.data;
   const lineas = [`*Control de Ingreso · ${S.evento}* — ${fmtFecha(c.fecha)}`];
-  const sel = turnos.filter((t) => c.turno === 'todos' || t.id === c.turno);
-  const regs = registros.filter((r) => sel.some((t) => t.id === r.turno_id));
+  const grupos = turnosFiltrados();
+  if (hayFiltroExtra()) lineas.push(`Filtro: ${descripcionFiltros()}`);
+  const regs = grupos.flatMap((g) => g.regs);
   const ing = regs.filter((r) => r.entrada).length;
   lineas.push(`Ingresaron ${ing}/${regs.length} · Faltan ${regs.length - ing} · Salieron ${regs.filter((r) => r.salida).length}`);
-  for (const t of sel) {
-    const rt = registros.filter((r) => r.turno_id === t.id);
+  for (const { t, regs: rt } of grupos) {
     const { ini } = rangoTurno(t);
     const tarde = (r) => r.entrada && new Date(r.entrada) - ini > t.tolerancia * 60000;
     const nombre = (r) => `${r.apellido}, ${r.nombre}`;
@@ -867,18 +901,16 @@ function textoResumen() {
 }
 
 // ───────── Exportación (CSV, Excel, PDF) ─────────
-// Las tres usan los mismos datos: el día elegido y el turno seleccionado (o todos).
+// Las tres usan los mismos datos que se ven en pantalla: día, turno, estado y búsqueda.
+// Sin filtros, sale el día completo.
 
 function datosExport() {
   const c = S.ctl;
-  const { turnos, registros } = c.data;
   const ahora = Date.now();
-  const grupos = turnos
-    .filter((t) => c.turno === 'todos' || t.id === c.turno)
-    .map((t) => {
+  const grupos = turnosFiltrados()
+    .map(({ t, regs: base }) => {
       const { ini, fin } = rangoTurno(t);
-      const regs = registros
-        .filter((r) => r.turno_id === t.id)
+      const regs = base
         .map((r) => {
           const est = estadoDe(r);
           const demora = r.entrada ? Math.max(0, Math.round((new Date(r.entrada) - ini) / 60000)) : null;
@@ -910,13 +942,18 @@ function datosExport() {
     });
   const suma = (k) => grupos.reduce((s, g) => s + g[k], 0);
   const totales = Object.fromEntries(['tot', 'ing', 'adentro', 'salieron', 'faltan', 'tarde'].map((k) => [k, suma(k)]));
-  const unTurno = c.turno !== 'todos' ? grupos[0]?.t : null;
-  const sufijo = unTurno ? `-${norm(unTurno.nombre).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}` : '';
+  // El nombre del archivo indica los filtros: asistencia-2026-11-14-sabado-14-dia-adentro.pdf
+  const slug = (s) => norm(s).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const turno = c.turno !== 'todos' && c.data.turnos.find((t) => t.id === c.turno);
+  const sufijo = [turno && turno.nombre, c.estado !== 'todos' && ESTADOS_FILTRO[c.estado], c.q.trim() && 'busqueda']
+    .filter(Boolean)
+    .map((s) => '-' + slug(s))
+    .join('');
   return {
     grupos,
     totales,
     fecha: c.fecha,
-    alcance: unTurno ? `Turno ${unTurno.nombre}` : 'Todos los turnos',
+    alcance: descripcionFiltros(),
     archivo: `asistencia-${c.fecha}${sufijo}`,
   };
 }
@@ -1124,6 +1161,7 @@ const EXPORTADORES = {
 async function exportar(tipo, boton) {
   const e = EXPORTADORES[tipo];
   if (!S.ctl.data?.registros.length) return toast('No hay personal asignado para exportar');
+  if (!turnosFiltrados().some((g) => g.regs.length)) return toast('No hay registros con los filtros aplicados');
   if (boton) boton.disabled = true;
   if (tipo !== 'csv') toast(`Generando ${e.nombre}…`, { ms: 1500 });
   try {
