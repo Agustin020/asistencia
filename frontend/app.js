@@ -208,11 +208,31 @@ function descargarCSV(nombre, filas) {
     return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const csv = '﻿' + filas.map((f) => f.map(celda).join(';')).join('\r\n');
+  descargarBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), nombre);
+}
+
+function descargarBlob(blob, nombre) {
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  a.href = URL.createObjectURL(blob);
   a.download = nombre;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+// Carga un script una sola vez (las librerías de PDF/Excel pesan ~1 MB y sólo se bajan al exportar).
+const scriptsCargados = {};
+function cargarScript(src) {
+  scriptsCargados[src] ??= new Promise((ok, falla) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = ok;
+    s.onerror = () => {
+      delete scriptsCargados[src];
+      falla(new Error('No se pudo cargar la librería de exportación. Revisá la conexión.'));
+    };
+    document.head.append(s);
+  });
+  return scriptsCargados[src];
 }
 
 // ═════════════════════════ Tema claro / oscuro ═════════════════════════
@@ -407,7 +427,11 @@ async function vistaControl() {
     <section id="lista" class="lista"><div class="cargando">Cargando…</div></section>
     <div class="bottombar">
       ${can('turnos.gestionar') ? '<button class="btn green" id="bAgregar">+ Agregar</button>' : ''}
-      ${can('reportes.exportar') ? '<button class="btn primary" id="bResumen">Copiar resumen</button><button class="btn" id="bCSV">Exportar CSV</button>' : ''}
+      ${can('reportes.exportar') ? `<button class="btn primary" id="bResumen">Copiar resumen</button>
+        <button class="btn solo-ancho" data-exp="pdf">📄 PDF</button>
+        <button class="btn solo-ancho" data-exp="xlsx">📊 Excel</button>
+        <button class="btn solo-ancho" data-exp="csv">Exportar CSV</button>
+        <button class="btn solo-angosto" id="bDescargar">⬇ Descargar</button>` : ''}
     </div>`;
 
   const sel = $('#fechaSel');
@@ -446,7 +470,8 @@ async function vistaControl() {
   $('#lista').onclick = onClickLista;
   $('#bAgregar') && ($('#bAgregar').onclick = modalAgregar);
   $('#bResumen') && ($('#bResumen').onclick = async () => { await copiar(textoResumen()); toast('Resumen copiado. Pegalo en WhatsApp.', { tipo: 'ok' }); });
-  $('#bCSV') && ($('#bCSV').onclick = exportarCSV);
+  $$('.bottombar [data-exp]').forEach((b) => (b.onclick = () => exportar(b.dataset.exp, b)));
+  $('#bDescargar') && ($('#bDescargar').onclick = modalDescargar);
 
   await cargarAsistencia();
   S.timer = setInterval(() => {
@@ -841,25 +866,288 @@ function textoResumen() {
   return lineas.join('\n');
 }
 
-function exportarCSV() {
+// ───────── Exportación (CSV, Excel, PDF) ─────────
+// Las tres usan los mismos datos: el día elegido y el turno seleccionado (o todos).
+
+function datosExport() {
   const c = S.ctl;
   const { turnos, registros } = c.data;
-  const tmap = new Map(turnos.map((t) => [t.id, t]));
+  const ahora = Date.now();
+  const grupos = turnos
+    .filter((t) => c.turno === 'todos' || t.id === c.turno)
+    .map((t) => {
+      const { ini, fin } = rangoTurno(t);
+      const regs = registros
+        .filter((r) => r.turno_id === t.id)
+        .map((r) => {
+          const est = estadoDe(r);
+          const demora = r.entrada ? Math.max(0, Math.round((new Date(r.entrada) - ini) / 60000)) : null;
+          const aunNoEmpieza = est === 'pend' && ahora < ini;
+          return {
+            ...r,
+            est,
+            aunNoEmpieza,
+            estado: est === 'in' ? 'Adentro' : est === 'out' ? 'Salió' : ahora > fin ? 'Ausente' : aunNoEmpieza ? 'Pendiente' : 'Falta',
+            demora,
+            tarde: demora !== null && demora > t.tolerancia,
+            permanencia: r.entrada && r.salida ? dur(new Date(r.salida) - new Date(r.entrada)) : '',
+            puestoFinal: r.puesto || t.puesto || '',
+          };
+        });
+      const n = (f) => regs.filter(f).length;
+      return {
+        t,
+        regs,
+        tot: regs.length,
+        ing: n((r) => r.entrada),
+        adentro: n((r) => r.est === 'in'),
+        salieron: n((r) => r.est === 'out'),
+        faltan: n((r) => r.est === 'pend'),
+        tarde: n((r) => r.tarde),
+      };
+    });
+  const suma = (k) => grupos.reduce((s, g) => s + g[k], 0);
+  const totales = Object.fromEntries(['tot', 'ing', 'adentro', 'salieron', 'faltan', 'tarde'].map((k) => [k, suma(k)]));
+  const unTurno = c.turno !== 'todos' ? grupos[0]?.t : null;
+  const sufijo = unTurno ? `-${norm(unTurno.nombre).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}` : '';
+  return {
+    grupos,
+    totales,
+    fecha: c.fecha,
+    alcance: unTurno ? `Turno ${unTurno.nombre}` : 'Todos los turnos',
+    archivo: `asistencia-${c.fecha}${sufijo}`,
+  };
+}
+
+// Hora de una marca; si cae en otro día que el turno (turnos nocturnos), agrega la fecha.
+const horaMarca = (iso, fecha) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleDateString('sv-SE') === fecha ? fmtHora(iso) : fmtFechaHora(iso);
+};
+
+function exportarCSV() {
+  const d = datosExport();
   const filas = [['Fecha', 'Turno', 'Horario', 'Puesto', 'DNI', 'Apellido', 'Nombre', 'Entrada', 'Salida', 'Permanencia', 'Estado', 'Demora (min)', 'Marcó entrada', 'Marcó salida', 'Observaciones']];
-  for (const r of registros) {
-    const t = tmap.get(r.turno_id);
-    if (c.turno !== 'todos' && t.id !== c.turno) continue;
-    const { ini } = rangoTurno(t);
-    const demora = r.entrada ? Math.round((new Date(r.entrada) - ini) / 60000) : '';
-    filas.push([
-      t.fecha, t.nombre, `${t.hora_inicio}-${t.hora_fin}`, r.puesto || t.puesto, r.dni, r.apellido, r.nombre,
-      r.entrada ? fmtFechaHora(r.entrada) : '', r.salida ? fmtFechaHora(r.salida) : '',
-      r.entrada && r.salida ? dur(new Date(r.salida) - new Date(r.entrada)) : '',
-      { pend: 'Pendiente', in: 'Adentro', out: 'Salió' }[estadoDe(r)],
-      demora === '' ? '' : Math.max(0, demora), r.entrada_por || '', r.salida_por || '', r.observaciones,
-    ]);
+  for (const { t, regs } of d.grupos) {
+    for (const r of regs) {
+      filas.push([
+        t.fecha, t.nombre, `${t.hora_inicio}-${t.hora_fin}`, r.puestoFinal, r.dni, r.apellido, r.nombre,
+        r.entrada ? fmtFechaHora(r.entrada) : '', r.salida ? fmtFechaHora(r.salida) : '', r.permanencia, r.estado,
+        r.demora ?? '', r.entrada_por || '', r.salida_por || '', r.observaciones,
+      ]);
+    }
   }
-  descargarCSV(`asistencia-${c.fecha}.csv`, filas);
+  descargarCSV(`${d.archivo}.csv`, filas);
+}
+
+async function exportarExcel() {
+  await cargarScript('/vendor/exceljs.min.js');
+  const d = datosExport();
+  const wb = new ExcelJS.Workbook();
+  wb.creator = S.user.nombre;
+  wb.created = new Date();
+  // Excel no maneja zonas horarias: se guarda la hora local "tal cual" para que se vea igual que en la app.
+  const fechaExcel = (iso) => {
+    if (!iso) return null;
+    const x = new Date(iso);
+    return new Date(x.getTime() - x.getTimezoneOffset() * 60000);
+  };
+  const OSCURO = 'FF0F172A';
+  const COLOR = { in: 'FFECFDF3', out: 'FFF1F5F9', pend: 'FFFEE2E2' };
+  const borde = { style: 'thin', color: { argb: 'FFE5E7EB' } };
+  const bordes = { top: borde, left: borde, bottom: borde, right: borde };
+  const encabezado = (row) => {
+    row.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    row.alignment = { vertical: 'middle' };
+    row.height = 20;
+    row.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: OSCURO } };
+      cell.border = bordes;
+    });
+  };
+  const titulo = (ws, columnas, subtitulo) => {
+    ws.mergeCells(1, 1, 1, columnas);
+    ws.mergeCells(2, 1, 2, columnas);
+    Object.assign(ws.getCell(1, 1), { value: `Control de Ingreso · ${S.evento}`, font: { bold: true, size: 16 } });
+    Object.assign(ws.getCell(2, 1), { value: subtitulo, font: { color: { argb: 'FF6B7280' } } });
+  };
+  const sub = `${fmtFecha(d.fecha)} · ${d.alcance} · Generado el ${new Date().toLocaleString('es-AR', { hour12: false })} por ${S.user.nombre}`;
+
+  // Hoja 1: planilla completa
+  const ws = wb.addWorksheet('Asistencia', {
+    views: [{ state: 'frozen', ySplit: 4 }],
+    pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
+  });
+  const COLS = [
+    ['Turno', 16], ['Horario', 12], ['Puesto', 18], ['DNI', 12], ['Apellido', 20], ['Nombre', 20], ['Entrada', 17], ['Salida', 17],
+    ['Permanencia', 13], ['Estado', 11], ['Demora (min)', 13], ['Marcó entrada', 20], ['Marcó salida', 20], ['Observaciones', 34],
+  ];
+  ws.columns = COLS.map(([, width]) => ({ width }));
+  titulo(ws, COLS.length, sub);
+  const cab = ws.getRow(4);
+  cab.values = COLS.map(([h]) => h);
+  encabezado(cab);
+  for (const { t, regs } of d.grupos) {
+    for (const r of regs) {
+      const row = ws.addRow([
+        t.nombre, `${t.hora_inicio}-${t.hora_fin}`, r.puestoFinal, r.dni, r.apellido, r.nombre, fechaExcel(r.entrada), fechaExcel(r.salida),
+        r.permanencia, r.estado, r.demora, r.entrada_por || '', r.salida_por || '', r.observaciones,
+      ]);
+      row.eachCell({ includeEmpty: true }, (cell) => {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: r.aunNoEmpieza ? 'FFFFFFFF' : COLOR[r.est] } };
+        cell.border = bordes;
+      });
+      row.getCell(7).numFmt = row.getCell(8).numFmt = 'dd/mm/yyyy hh:mm';
+      if (r.tarde) row.getCell(11).font = { bold: true, color: { argb: 'FFB45309' } };
+      if (r.est === 'pend' && !r.aunNoEmpieza) row.getCell(10).font = { bold: true, color: { argb: 'FFB91C1C' } };
+    }
+  }
+  ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4, column: COLS.length } };
+
+  // Hoja 2: resumen por turno
+  const wr = wb.addWorksheet('Resumen por turno', { views: [{ state: 'frozen', ySplit: 4 }] });
+  const RC = [['Turno', 18], ['Horario', 12], ['Puesto', 20], ['Tolerancia', 11], ['Asignados', 11], ['Ingresaron', 11], ['Adentro', 10], ['Salieron', 10], ['Faltan', 10], ['Llegaron tarde', 14], ['% asistencia', 13]];
+  wr.columns = RC.map(([, width]) => ({ width }));
+  titulo(wr, RC.length, sub);
+  const cabR = wr.getRow(4);
+  cabR.values = RC.map(([h]) => h);
+  encabezado(cabR);
+  const pct = (a, b) => (b ? a / b : 0);
+  for (const g of d.grupos) {
+    const row = wr.addRow([g.t.nombre, `${g.t.hora_inicio}-${g.t.hora_fin}`, g.t.puesto, `${g.t.tolerancia} min`, g.tot, g.ing, g.adentro, g.salieron, g.faltan, g.tarde, pct(g.ing, g.tot)]);
+    row.eachCell({ includeEmpty: true }, (cell) => (cell.border = bordes));
+    row.getCell(11).numFmt = '0%';
+  }
+  const tot = wr.addRow(['TOTAL', '', '', '', d.totales.tot, d.totales.ing, d.totales.adentro, d.totales.salieron, d.totales.faltan, d.totales.tarde, pct(d.totales.ing, d.totales.tot)]);
+  tot.font = { bold: true };
+  tot.eachCell({ includeEmpty: true }, (cell) => {
+    cell.border = bordes;
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3F4F6' } };
+  });
+  tot.getCell(11).numFmt = '0%';
+
+  const buf = await wb.xlsx.writeBuffer();
+  descargarBlob(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `${d.archivo}.xlsx`);
+}
+
+async function exportarPDF() {
+  await cargarScript('/vendor/jspdf.umd.min.js');
+  await cargarScript('/vendor/jspdf.plugin.autotable.min.js');
+  // El plugin agrega doc.autoTable; si una versión futura no lo hace, se usa la función global.
+  const tabla = (doc, opciones) => (typeof doc.autoTable === 'function' ? doc.autoTable(opciones) : window.autoTable(doc, opciones));
+  const d = datosExport();
+  const doc = new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+  const W = doc.internal.pageSize.getWidth();
+  const H = doc.internal.pageSize.getHeight();
+  const M = 12;
+  // Las fuentes estándar del PDF no traen guiones largos ni emojis.
+  const txt = (s) => String(s ?? '').replace(/[–—]/g, '-').replace(/[^\u0000-ÿ]/g, '');
+  const fecha = fmtFecha(d.fecha);
+
+  doc.setFont('helvetica', 'bold').setFontSize(16).setTextColor(17, 24, 39);
+  doc.text(txt(`Control de Ingreso · ${S.evento}`), M, 15);
+  doc.setFont('helvetica', 'normal').setFontSize(10).setTextColor(100, 116, 139);
+  doc.text(txt(`${fecha.charAt(0).toUpperCase() + fecha.slice(1)} · ${d.alcance} · Generado el ${new Date().toLocaleString('es-AR', { hour12: false })} por ${S.user.nombre}`), M, 21);
+  const T = d.totales;
+  doc.setFont('helvetica', 'bold').setTextColor(17, 24, 39);
+  doc.text(txt(`Asignados ${T.tot}  ·  Ingresaron ${T.ing}  ·  Adentro ${T.adentro}  ·  Salieron ${T.salieron}  ·  Faltan ${T.faltan}  ·  Llegaron tarde ${T.tarde}`), M, 28);
+
+  const FONDO = { in: [236, 253, 243], out: [241, 245, 249], pend: [254, 226, 226] };
+  let y = 35;
+  for (const g of d.grupos) {
+    if (y > H - 35) {
+      doc.addPage();
+      y = 15;
+    }
+    doc.setFont('helvetica', 'bold').setFontSize(12).setTextColor(17, 24, 39);
+    doc.text(txt(`${g.t.nombre.toUpperCase()}  ·  ${g.t.hora_inicio} a ${g.t.hora_fin}${g.t.puesto ? '  ·  ' + g.t.puesto : ''}  ·  ${g.ing}/${g.tot} ingresaron`), M, y);
+    const opciones = {
+      startY: y + 2,
+      margin: { left: M, right: M, bottom: 16 },
+      head: [['#', 'Apellido y nombre', 'DNI', 'Puesto', 'Entrada', 'Salida', 'Permanencia', 'Estado', 'Demora', 'Observaciones']],
+      body: g.regs.length
+        ? g.regs.map((r, i) => [
+            i + 1, txt(`${r.apellido}, ${r.nombre}`), r.dni, txt(r.puestoFinal), horaMarca(r.entrada, g.t.fecha), horaMarca(r.salida, g.t.fecha),
+            r.permanencia, r.estado, r.tarde ? `+${r.demora} min` : '', txt(r.observaciones),
+          ])
+        : [[{ content: 'Sin personal asignado', colSpan: 10, styles: { halign: 'center', textColor: [100, 116, 139] } }]],
+      theme: 'grid',
+      styles: { fontSize: 9, cellPadding: 1.8, lineColor: [226, 232, 240], lineWidth: 0.1, textColor: [17, 24, 39] },
+      headStyles: { fillColor: [15, 23, 42], textColor: 255, fontStyle: 'bold' },
+      // Anchos fijos para que las tablas de todos los turnos queden alineadas; Observaciones toma el resto.
+      columnStyles: {
+        0: { cellWidth: 8, halign: 'right' }, 1: { cellWidth: 55 }, 2: { cellWidth: 22 }, 3: { cellWidth: 36 },
+        4: { cellWidth: 20 }, 5: { cellWidth: 20 }, 6: { cellWidth: 25 }, 7: { cellWidth: 20 }, 8: { cellWidth: 18 },
+      },
+      didParseCell: (cell) => {
+        const r = g.regs[cell.row.index];
+        if (cell.section !== 'body' || !r) return;
+        cell.cell.styles.fillColor = r.aunNoEmpieza ? [255, 255, 255] : FONDO[r.est];
+        if (cell.column.index === 7 && r.est === 'pend' && !r.aunNoEmpieza) Object.assign(cell.cell.styles, { textColor: [185, 28, 28], fontStyle: 'bold' });
+        if (cell.column.index === 8 && r.tarde) Object.assign(cell.cell.styles, { textColor: [180, 83, 9], fontStyle: 'bold' });
+      },
+    };
+    tabla(doc, opciones);
+    y = doc.lastAutoTable.finalY + 10;
+  }
+
+  // Firmas al pie, para entregar la planilla impresa.
+  if (y > H - 30) {
+    doc.addPage();
+    y = 30;
+  } else y += 8;
+  doc.setDrawColor(148, 163, 184).setFont('helvetica', 'normal').setFontSize(9).setTextColor(100, 116, 139);
+  [M, W / 2 + 10].forEach((x, i) => {
+    doc.line(x, y, x + 80, y);
+    doc.text(i ? 'Firma y aclaración del jefe' : 'Firma y aclaración del supervisor', x, y + 5);
+  });
+
+  const paginas = doc.getNumberOfPages();
+  for (let p = 1; p <= paginas; p++) {
+    doc.setPage(p);
+    doc.setFontSize(8).setTextColor(148, 163, 184);
+    doc.text(txt(`${S.evento} · Asistencia ${d.fecha}`), M, H - 7);
+    doc.text(`Página ${p} de ${paginas}`, W - M, H - 7, { align: 'right' });
+  }
+  doc.save(`${d.archivo}.pdf`);
+}
+
+const EXPORTADORES = {
+  pdf: { fn: exportarPDF, nombre: 'PDF', icono: '📄', desc: 'Planilla lista para imprimir y firmar' },
+  xlsx: { fn: exportarExcel, nombre: 'Excel', icono: '📊', desc: 'Con colores, filtros y resumen por turno' },
+  csv: { fn: exportarCSV, nombre: 'CSV', icono: '🧾', desc: 'Texto plano para otros sistemas' },
+};
+
+async function exportar(tipo, boton) {
+  const e = EXPORTADORES[tipo];
+  if (!S.ctl.data?.registros.length) return toast('No hay personal asignado para exportar');
+  if (boton) boton.disabled = true;
+  if (tipo !== 'csv') toast(`Generando ${e.nombre}…`, { ms: 1500 });
+  try {
+    await e.fn();
+  } catch (ex) {
+    toastError(ex);
+  } finally {
+    if (boton) boton.disabled = false;
+  }
+}
+
+function modalDescargar() {
+  const m = modal({
+    title: 'Descargar asistencia',
+    body: `<p class="hint" style="margin-bottom:10px">${esc(fmtFecha(S.ctl.fecha))} · ${esc(datosExport().alcance)}</p>
+      <div class="exp-opciones">${Object.entries(EXPORTADORES)
+        .map(([k, e]) => `<button type="button" class="exp-op" data-exp="${k}"><span class="exp-ico">${e.icono}</span>
+          <span><b>${e.nombre}</b><small>${e.desc}</small></span></button>`)
+        .join('')}</div>`,
+  });
+  $('.exp-opciones', m.el).onclick = (ev) => {
+    const b = ev.target.closest('[data-exp]');
+    if (!b) return;
+    m.close();
+    exportar(b.dataset.exp);
+  };
 }
 
 // ═════════════════════════ Horarios (plantilla de turnos) ═════════════════════════

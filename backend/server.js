@@ -28,6 +28,18 @@ app.use('/api/auth', authRouter);
 app.use('/api', api);
 app.use('/api', (req, res) => res.status(404).json({ error: 'Ruta inexistente' }));
 
+// Librerías del navegador para exportar PDF y Excel, servidas desde node_modules (sin depender de un CDN).
+// Se cargan sólo cuando alguien descarga un archivo.
+const VENDOR = {
+  'jspdf.umd.min.js': 'jspdf/dist/jspdf.umd.min.js',
+  'jspdf.plugin.autotable.min.js': 'jspdf-autotable/dist/jspdf.plugin.autotable.min.js',
+  'exceljs.min.js': 'exceljs/dist/exceljs.min.js',
+};
+for (const [nombre, archivo] of Object.entries(VENDOR)) {
+  const ruta = path.join(__dirname, '..', 'node_modules', archivo);
+  app.get(`/vendor/${nombre}`, (req, res) => res.set('Cache-Control', 'public, max-age=86400').sendFile(ruta));
+}
+
 // no-cache: el navegador revalida siempre, así los celulares toman la última versión tras cada deploy.
 app.use(express.static(FRONTEND, { setHeaders: (res) => res.set('Cache-Control', 'no-cache') }));
 app.use((req, res) => res.sendFile(path.join(FRONTEND, 'index.html')));

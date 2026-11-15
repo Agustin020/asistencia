@@ -262,6 +262,21 @@ a { color: var(--blue); }
   background: var(--bar-bg); backdrop-filter: blur(6px); border-top: 1px solid var(--line);
 }
 .bottombar .btn { flex: 1; padding: 13px 8px; font-size: 15px; }
+/* En pantallas anchas cada formato tiene su botón; en angostas se agrupan en "Descargar" */
+.bottombar .solo-angosto { display: none; }
+@media (max-width: 820px) {
+  .bottombar .solo-ancho { display: none; }
+  .bottombar .solo-angosto { display: block; }
+}
+.exp-opciones { display: grid; gap: 8px; }
+.exp-op {
+  display: flex; align-items: center; gap: 14px; text-align: left; width: 100%; padding: 14px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--text);
+}
+.exp-op:hover { border-color: var(--blue); }
+.exp-op b { display: block; font-size: 16px; }
+.exp-op small { color: var(--muted); font-size: 13px; }
+.exp-ico { font-size: 26px; line-height: 1; }
 
 /* ── Páginas de gestión ── */
 .page { max-width: 1100px; margin: 0 auto; padding: 16px 12px 60px; }
