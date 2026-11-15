@@ -889,6 +889,8 @@ function datosExport() {
             aunNoEmpieza,
             estado: est === 'in' ? 'Adentro' : est === 'out' ? 'Salió' : ahora > fin ? 'Ausente' : aunNoEmpieza ? 'Pendiente' : 'Falta',
             demora,
+            // Mismo formato que "Copiar resumen": +25 min, +1h 05m
+            demoraTxt: demora ? `+${dur(demora * 60000)}` : '',
             tarde: demora !== null && demora > t.tolerancia,
             permanencia: r.entrada && r.salida ? dur(new Date(r.salida) - new Date(r.entrada)) : '',
             puestoFinal: r.puesto || t.puesto || '',
@@ -981,7 +983,7 @@ async function exportarExcel() {
   });
   const COLS = [
     ['Turno', 16], ['Horario', 12], ['Puesto', 18], ['DNI', 12], ['Apellido', 20], ['Nombre', 20], ['Entrada', 17], ['Salida', 17],
-    ['Permanencia', 13], ['Estado', 11], ['Demora (min)', 13], ['Marcó entrada', 20], ['Marcó salida', 20], ['Observaciones', 34],
+    ['Permanencia', 13], ['Estado', 11], ['Demora', 13], ['Marcó entrada', 20], ['Marcó salida', 20], ['Observaciones', 34],
   ];
   ws.columns = COLS.map(([, width]) => ({ width }));
   titulo(ws, COLS.length, sub);
@@ -992,7 +994,7 @@ async function exportarExcel() {
     for (const r of regs) {
       const row = ws.addRow([
         t.nombre, `${t.hora_inicio}-${t.hora_fin}`, r.puestoFinal, r.dni, r.apellido, r.nombre, fechaExcel(r.entrada), fechaExcel(r.salida),
-        r.permanencia, r.estado, r.demora, r.entrada_por || '', r.salida_por || '', r.observaciones,
+        r.permanencia, r.estado, r.demoraTxt, r.entrada_por || '', r.salida_por || '', r.observaciones,
       ]);
       row.eachCell({ includeEmpty: true }, (cell) => {
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: r.aunNoEmpieza ? 'FFFFFFFF' : COLOR[r.est] } };
@@ -1069,7 +1071,7 @@ async function exportarPDF() {
       body: g.regs.length
         ? g.regs.map((r, i) => [
             i + 1, txt(`${r.apellido}, ${r.nombre}`), r.dni, txt(r.puestoFinal), horaMarca(r.entrada, g.t.fecha), horaMarca(r.salida, g.t.fecha),
-            r.permanencia, r.estado, r.tarde ? `+${r.demora} min` : '', txt(r.observaciones),
+            r.permanencia, r.estado, r.tarde ? r.demoraTxt : '', txt(r.observaciones),
           ])
         : [[{ content: 'Sin personal asignado', colSpan: 10, styles: { halign: 'center', textColor: [100, 116, 139] } }]],
       theme: 'grid',
